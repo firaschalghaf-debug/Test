@@ -16,12 +16,17 @@ struct AuthView: View {
             VStack(spacing: 24) {
                 Spacer()
                 brandingSection
-                formCard
+                if authVM.awaitingConfirmation {
+                    confirmationCard
+                } else {
+                    formCard
+                }
                 Spacer()
             }
             .padding(28)
 
             Button {
+                authVM.dismissConfirmation()
                 dismiss()
             } label: {
                 Image(systemName: "xmark.circle.fill")
@@ -122,6 +127,45 @@ struct AuthView: View {
             RoundedRectangle(cornerRadius: 28)
                 .stroke(Color.white.opacity(0.08), lineWidth: 1)
         )
+        .frame(maxWidth: 460)
+    }
+
+    private var confirmationCard: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "envelope.badge.fill")
+                .font(.system(size: 48))
+                .foregroundStyle(.cyan)
+
+            VStack(spacing: 8) {
+                Text("Check your email")
+                    .font(.title2.bold())
+                    .foregroundStyle(.white)
+                Text("We sent a confirmation link to\n\(authVM.pendingConfirmationEmail)")
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.65))
+                    .multilineTextAlignment(.center)
+            }
+
+            Text("Click the link in your email, then come back and sign in.")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.45))
+                .multilineTextAlignment(.center)
+
+            Button {
+                authVM.dismissConfirmation()
+                isSignUp = false
+                email = authVM.pendingConfirmationEmail
+            } label: {
+                Text("Continue to Sign In")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.cyan)
+        }
+        .padding(28)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 28))
+        .overlay(RoundedRectangle(cornerRadius: 28).stroke(Color.white.opacity(0.08), lineWidth: 1))
         .frame(maxWidth: 460)
     }
 

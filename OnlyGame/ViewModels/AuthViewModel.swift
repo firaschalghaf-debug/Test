@@ -6,14 +6,21 @@ import Supabase
 final class AuthViewModel: ObservableObject {
 
     // MARK: - Session state (set only after successful auth)
-    @Published var sessionEmail: String = ""
-    @Published var username:     String = ""
-    @Published var userId:       UUID?  = nil
-    @Published var role:         String = "user"
+    @Published var sessionEmail:         String = ""
+    @Published var username:             String = ""
+    @Published var userId:               UUID?  = nil
+    @Published var role:                 String = "user"
+    @Published var pendingFriendsCount:  Int    = 0
 
     // MARK: - UI state
-    @Published var isLoading    = false
-    @Published var errorMessage = ""
+    @Published var isLoading                  = false
+    @Published var errorMessage               = ""
+    @Published var awaitingConfirmation       = false
+    @Published var pendingConfirmationEmail   = ""
+
+    // MARK: - Wallet
+    @Published var walletBalance: Double = 0
+    @Published var isTopping:     Bool   = false
 
     // MARK: - Derived
 
@@ -60,6 +67,14 @@ final class AuthViewModel: ObservableObject {
         do {
             try await SupabaseManager.shared.signUp(email: email, password: password)
             let name = username.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Not signed in yet — email confirmation required
+            if SupabaseManager.shared.currentUserUUID == nil {
+                awaitingConfirmation     = true
+                pendingConfirmationEmail = email
+                return
+            }
+
             if !name.isEmpty {
                 _ = try? await SupabaseManager.shared.client.auth.update(
                     user: UserAttributes(data: ["display_name": .string(name)])
@@ -74,13 +89,42 @@ final class AuthViewModel: ObservableObject {
         }
     }
 
+    func dismissConfirmation() {
+        awaitingConfirmation     = false
+        pendingConfirmationEmail = ""
+    }
+
     func signOut() async {
         try? await SupabaseManager.shared.signOut()
-        sessionEmail = ""
-        username     = ""
-        userId       = nil
-        role         = "user"
-        errorMessage = ""
+        sessionEmail        = ""
+        username            = ""
+        userId              = nil
+        role                = "user"
+        errorMessage        = ""
+        pendingFriendsCount = 0
+        walletBalance       = 0
+    }
+
+    func fetchWallet() async {
+        guard let uid = userId else { return }
+        walletBalance = (try? await SupabaseManager.shared.fetchWalletBalance(userId: uid)) ?? 0
+    }
+
+    func topUp(amount: Double) async {
+        guard let uid = userId else { return }
+        isTopping = true
+        defer { isTopping = false }
+        walletBalance = (try? await SupabaseManager.shared.topUpWallet(userId: uid, amount: amount)) ?? walletBalance
+    }
+
+    func deductWallet(amount: Double) async throws {
+        guard let uid = userId else { return }
+        walletBalance = try await SupabaseManager.shared.deductFromWallet(userId: uid, amount: amount)
+    }
+
+    func refreshPendingFriends() async {
+        guard let uid = userId else { return }
+        pendingFriendsCount = (try? await SupabaseManager.shared.fetchPendingFriendsCount(userId: uid)) ?? 0
     }
 
     // MARK: - Private

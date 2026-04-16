@@ -21,7 +21,12 @@ struct ProfilePage: View {
             VStack(spacing: 24) {
                 heroBanner
                 statsRow
+                walletCard
                 detailsRow
+                if let userId = authVM.userId {
+                    OrderHistorySection(userId: userId)
+                        .padding(.top, 4)
+                }
             }
             .padding(28)
         }
@@ -105,6 +110,45 @@ struct ProfilePage: View {
             .padding(.vertical, 8)
             .background(Color.white.opacity(0.07))
             .clipShape(Capsule())
+    }
+
+    private var walletCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Label("Wallet", systemImage: "creditcard.fill")
+                    .font(.title2.bold())
+                    .foregroundStyle(.white)
+                Spacer()
+                Text(String(format: "$%.2f", authVM.walletBalance))
+                    .font(.system(size: 28, weight: .bold))
+                    .foregroundStyle(.cyan)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Top Up")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.60))
+                HStack(spacing: 10) {
+                    ForEach([5.0, 10.0, 25.0, 50.0], id: \.self) { amount in
+                        Button {
+                            Task { await authVM.topUp(amount: amount) }
+                        } label: {
+                            Text("+$\(Int(amount))")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.cyan)
+                        .disabled(authVM.isTopping)
+                    }
+                }
+            }
+        }
+        .padding(24)
+        .background(Color.white.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 28))
+        .overlay(RoundedRectangle(cornerRadius: 28).stroke(Color.white.opacity(0.10), lineWidth: 1))
     }
 
     private var statsRow: some View {

@@ -9,12 +9,33 @@ final class StoreViewModel: ObservableObject {
     @Published var dbGames: [Game] = []
     @Published var isLoadingGames = false
     @Published var gamesLoadError = ""
+    @Published var activeDiscounts: [UUID: Double] = [:]
 
     // MARK: - Cart
     @Published var cartItems: [Game] = []
 
     // MARK: - Cloud library (Supabase user_library)
     @Published var cloudLibraryIds: Set<UUID> = []
+
+    // MARK: - Wishlist
+    @Published var wishlistIds: Set<UUID> = []
+
+    var wishlistGames: [Game] { activeGames.filter { wishlistIds.contains($0.id) } }
+
+    func loadWishlist(userId: UUID) async {
+        let ids = (try? await SupabaseManager.shared.fetchWishlistGameIds(userId: userId)) ?? []
+        wishlistIds = Set(ids)
+    }
+
+    func toggleWishlist(game: Game, userId: UUID) async {
+        if wishlistIds.contains(game.id) {
+            wishlistIds.remove(game.id)
+            try? await SupabaseManager.shared.removeFromWishlist(userId: userId, gameId: game.id)
+        } else {
+            wishlistIds.insert(game.id)
+            try? await SupabaseManager.shared.addToWishlist(userId: userId, gameId: game.id)
+        }
+    }
 
     // MARK: - Purchase history (guests / offline fallback)
     @Published var purchasedTitlesByAccount: [String: [String]] = [:]
@@ -70,25 +91,23 @@ final class StoreViewModel: ObservableObject {
     }
 
     func ownedTitles(isAdmin: Bool, accountKey: String) -> [String] {
+        if !cloudLibraryIds.isEmpty {
+            return activeGames.filter { cloudLibraryIds.contains($0.id) }.map { $0.title }
+        }
         if isAdmin {
             return currentAdminUser.ownedGameTitles
                 + (purchasedTitlesByUser[selectedUserID] ?? [])
-        }
-        // Use cloud library when available
-        if !cloudLibraryIds.isEmpty {
-            return activeGames.filter { cloudLibraryIds.contains($0.id) }.map { $0.title }
         }
         return purchasedTitlesByAccount[accountKey] ?? []
     }
 
     func libraryGames(isAdmin: Bool, accountKey: String) -> [Game] {
+        if !cloudLibraryIds.isEmpty {
+            return activeGames.filter { cloudLibraryIds.contains($0.id) }
+        }
         if isAdmin {
             let owned = Set(ownedTitles(isAdmin: true, accountKey: accountKey))
             return activeGames.filter { owned.contains($0.title) }
-        }
-        // Use cloud library when available
-        if !cloudLibraryIds.isEmpty {
-            return activeGames.filter { cloudLibraryIds.contains($0.id) }
         }
         let owned = Set(purchasedTitlesByAccount[accountKey] ?? [])
         return activeGames.filter { owned.contains($0.title) }
@@ -106,7 +125,13 @@ final class StoreViewModel: ObservableObject {
     }
 
     func favoriteGenres(isAdmin: Bool, accountKey: String) -> [String] {
-        if isAdmin { return currentAdminUser.favoriteGenres }
+        // Use cloud library for signed-in users
+        if !cloudLibraryIds.isEmpty {
+            let genres = activeGames.filter { cloudLibraryIds.contains($0.id) }.map { $0.genre }
+            let unique = Array(NSOrderedSet(array: genres)) as? [String] ?? []
+            return unique.isEmpty ? ["Action", "Adventure", "RPG"] : unique
+        }
+        // Local/guest fallback
         let owned = purchasedTitlesByAccount[accountKey] ?? []
         let genres = activeGames.filter { owned.contains($0.title) }.map { $0.genre }
         let unique = Array(NSOrderedSet(array: genres)) as? [String] ?? []
@@ -140,7 +165,9 @@ final class StoreViewModel: ObservableObject {
         return byGenre.filter {
             $0.title.localizedCaseInsensitiveContains(query) ||
             $0.genre.localizedCaseInsensitiveContains(query) ||
-            $0.subtitle.localizedCaseInsensitiveContains(query)
+            $0.subtitle.localizedCaseInsensitiveContains(query) ||
+            ($0.developerName?.localizedCaseInsensitiveContains(query) ?? false) ||
+            $0.tags.contains { $0.localizedCaseInsensitiveContains(query) }
         }
     }
 
@@ -178,36 +205,74 @@ final class StoreViewModel: ObservableObject {
         FeaturedBanner(title: "Skyline Racers", subtitle: "Compete in futuristic races with dynamic rewards.",              buttonTitle: "Start Racing", colors: [.blue, .cyan],    imageName: "car.fill",               coverImage: nil)
     ]
 
+    // MARK: - Signed-in user context (set from ContentView on auth change)
+    var currentUserId: UUID? = nil
+
     // MARK: - Cart
 
     func addToCart(_ game: Game) {
         guard !cartItems.contains(where: { $0.title == game.title }) else { return }
         cartItems.append(game)
+        if let userId = currentUserId {
+            Task { try? await SupabaseManager.shared.addCartItem(userId: userId, gameId: game.id) }
+        }
     }
 
     func removeFromCart(_ game: Game) {
+        if let userId = currentUserId {
+            let gameId = game.id
+            Task { try? await SupabaseManager.shared.removeCartItem(userId: userId, gameId: gameId) }
+        }
         cartItems.removeAll { $0.title == game.title }
     }
 
-    var cartTotal: String {
-        let total = cartItems.reduce(0.0) { sum, game in
-            sum + (Double(game.price.replacingOccurrences(of: "$", with: "")) ?? 0)
+    /// Called after sign-in. Merges local cart with cloud cart, pushes any local-only items to DB.
+    func loadCartFromCloud(userId: UUID) async {
+        do {
+            let cloudIds = Set(try await SupabaseManager.shared.fetchCartGameIds(userId: userId))
+
+            // Push any locally-held items not yet in the cloud cart
+            let localOnly = cartItems.filter { !cloudIds.contains($0.id) }
+            for game in localOnly {
+                try? await SupabaseManager.shared.addCartItem(userId: userId, gameId: game.id)
+            }
+
+            // Build full merged list from DB ids
+            let allIds = cloudIds.union(localOnly.map { $0.id })
+            let merged = activeGames.filter { allIds.contains($0.id) && !cloudLibraryIds.contains($0.id) }
+            cartItems = merged
+        } catch {
+            // Network failure — keep local cart as-is
         }
+    }
+
+    var cartTotal: String {
+        let total = cartItems.reduce(0.0) { $0 + $1.effectivePrice }
         return String(format: "$%.2f", total)
+    }
+
+    var cartSavings: Double {
+        cartItems.reduce(0.0) { sum, game in
+            guard game.isOnSale else { return sum }
+            return sum + (game.originalPriceValue - game.effectivePrice)
+        }
     }
 
     func checkout(isAdmin: Bool, accountKey: String, userId: UUID? = nil) async {
         guard !cartItems.isEmpty else { return }
 
         if let userId, !isAdmin {
-            // Authenticated user — write to Supabase user_library
-            let gameIds = cartItems.map { $0.id }
+            // Authenticated user — record order, write to library, clear cart
+            let games  = cartItems
+            let gameIds = games.map { $0.id }
             do {
+                try await SupabaseManager.shared.createOrder(userId: userId, games: games)
                 try await SupabaseManager.shared.addGamesToLibrary(userId: userId, gameIds: gameIds)
                 cloudLibraryIds.formUnion(gameIds)
+                try? await SupabaseManager.shared.clearCart(userId: userId)
             } catch {
                 // Supabase write failed — fall back to local so the user still sees their games
-                let titles  = cartItems.map { $0.title }
+                let titles   = games.map { $0.title }
                 let existing = purchasedTitlesByAccount[accountKey] ?? []
                 purchasedTitlesByAccount[accountKey] = Array(Set(existing + titles)).sorted()
                 saveAccountLibraries()
@@ -255,8 +320,17 @@ final class StoreViewModel: ObservableObject {
         isLoadingGames = true
         gamesLoadError = ""
         do {
-            let response = try await SupabaseManager.shared.client
-                .from("games").select().execute()
+            async let gamesResponse = SupabaseManager.shared.client
+                .from("games")
+                .select("id, title, genre, price, image, description, cover_image_url, release_date, developers(developer_name), publishers(publisher_name)")
+                .eq("is_active", value: true)
+                .execute()
+            async let discountsMap = SupabaseManager.shared.fetchActiveDiscounts()
+            async let tagsMap      = SupabaseManager.shared.fetchGameTags()
+
+            let (response, discounts, tags) = try await (gamesResponse, discountsMap, tagsMap)
+            activeDiscounts = discounts
+
             let decoder = JSONDecoder()
             decoder.keyDecodingStrategy = .convertFromSnakeCase
             let rows = try decoder.decode([SupabaseGameRow].self, from: response.data)
@@ -272,9 +346,14 @@ final class StoreViewModel: ObservableObject {
                     color: color(for: row.genre),
                     subtitle: row.description ?? subtitle(for: row.genre),
                     imageName: row.image ?? "gamecontroller.fill",
-                    coverImage: key == "crystal run" ? "crystal_run_cover" : nil,
+                    coverImage: nil,
                     description: row.description,
-                    coverImageUrl: row.coverImageUrl
+                    coverImageUrl: row.coverImageUrl,
+                    discountPercent: discounts[row.id],
+                    developerName: row.developers?.developerName,
+                    publisherName: row.publishers?.publisherName,
+                    tags: tags[row.id] ?? [],
+                    releaseDate: row.releaseDate
                 )
             }
         } catch {

@@ -98,7 +98,7 @@ struct AchievementsPage: View {
             Text("Achievements")
                 .font(.system(size: 36, weight: .bold))
                 .foregroundStyle(.white)
-            Text("\(unlocked.count) of \(allAchievements.count) unlocked across \(ownedGames.count) game\(ownedGames.count == 1 ? "" : "s")")
+            Text("\(unlocked.count) of \(allAchievements.count) completed across \(ownedGames.count) game\(ownedGames.count == 1 ? "" : "s")")
                 .font(.subheadline)
                 .foregroundStyle(.white.opacity(0.50))
         }
@@ -214,7 +214,7 @@ struct GameAchievementsSection: View {
                             .font(.headline)
                             .foregroundStyle(.white)
                         HStack(spacing: 10) {
-                            Text("\(unlockedCount)/\(achievements.count) unlocked")
+                            Text("\(unlockedCount)/\(achievements.count) completed")
                                 .font(.caption)
                                 .foregroundStyle(.white.opacity(0.50))
                             miniProgressBar
@@ -317,7 +317,7 @@ struct AchievementRow: View {
                 .foregroundStyle(achievement.isUnlocked ? achievement.rarity.color : .white.opacity(0.22))
 
                 if achievement.isUnlocked {
-                    Text("Unlocked")
+                    Text("Completed")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.green.opacity(0.85))
                 }

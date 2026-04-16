@@ -21,11 +21,14 @@ private struct MainAppView: View {
     @EnvironmentObject var authVM: AuthViewModel
     @EnvironmentObject var storeVM: StoreViewModel
 
-    @State private var selectedTab: SidebarTab?   = .store
-    @State private var featuredIndex              = 0
-    @State private var isCartPresented            = false
-    @State private var isAuthSheetPresented       = false
-    @State private var selectedStoreGame: Game?   = nil
+    @State private var selectedTab: SidebarTab?    = .store
+    @State private var featuredIndex               = 0
+    @State private var isCartPresented             = false
+    @State private var isWishlistPresented         = false
+    @State private var isFriendsPresented          = false
+    @State private var isProfilePresented          = false
+    @State private var isAuthSheetPresented        = false
+    @State private var selectedStoreGame: Game?    = nil
     @State private var selectedPlayableGame: Game? = nil
 
     private var accountKey: String {
@@ -43,27 +46,64 @@ private struct MainAppView: View {
         } detail: {
             ZStack {
                 appBackground.ignoresSafeArea()
-                tabContent
+                VStack(spacing: 0) {
+                    TopIconBar(
+                        isSignedIn: authVM.isSignedIn,
+                        displayName: authVM.displayName,
+                        isAdmin: authVM.isAdmin,
+                        walletBalance: authVM.walletBalance,
+                        cartCount: storeVM.cartItems.count,
+                        wishlistCount: storeVM.wishlistIds.count,
+                        pendingFriendsCount: authVM.pendingFriendsCount,
+                        onSignIn:   { isAuthSheetPresented = true },
+                        onCart:     { isCartPresented = true },
+                        onWishlist: { isWishlistPresented = true },
+                        onFriends:  { isFriendsPresented = true },
+                        onProfile:  { isProfilePresented = true }
+                    )
+                    tabContent
+                }
             }
         }
         .sheet(isPresented: $isCartPresented)      { cartSheet }
+        .sheet(isPresented: $isWishlistPresented)  { wishlistSheet }
+        .sheet(isPresented: $isFriendsPresented)   { friendsSheet }
+        .sheet(isPresented: $isProfilePresented)   { profileSheet }
         .sheet(item: $selectedStoreGame)           { gameDetailSheet(for: $0) }
         .sheet(item: $selectedPlayableGame)        { gamePlayerSheet(for: $0) }
         .sheet(isPresented: $isAuthSheetPresented) { authSheet }
-        // Dismiss auth sheet automatically after sign-in
+        // Dismiss auth sheet after sign-in, profile sheet after sign-out
         .onChange(of: authVM.isSignedIn) {
-            if authVM.isSignedIn { isAuthSheetPresented = false }
+            if authVM.isSignedIn {
+                isAuthSheetPresented = false
+            } else {
+                isProfilePresented = false
+            }
         }
         .task {
             if let userId = authVM.userId {
+                storeVM.currentUserId = userId
                 await storeVM.fetchUserLibrary(userId: userId)
+                await storeVM.loadCartFromCloud(userId: userId)
+                await storeVM.loadWishlist(userId: userId)
+                await authVM.refreshPendingFriends()
+                await authVM.fetchWallet()
             }
         }
         .onChange(of: authVM.userId) {
             if let userId = authVM.userId {
-                Task { await storeVM.fetchUserLibrary(userId: userId) }
+                storeVM.currentUserId = userId
+                Task {
+                    await storeVM.fetchUserLibrary(userId: userId)
+                    await storeVM.loadCartFromCloud(userId: userId)
+                    await storeVM.loadWishlist(userId: userId)
+                    await authVM.refreshPendingFriends()
+                    await authVM.fetchWallet()
+                }
             } else {
+                storeVM.currentUserId = nil
                 storeVM.cloudLibraryIds = []
+                storeVM.wishlistIds = []
             }
         }
     }
@@ -76,9 +116,7 @@ private struct MainAppView: View {
         case .store:
             StorePage(
                 featuredIndex: $featuredIndex,
-                onOpenCart:    { isCartPresented = true },
                 onOpenGame:    { selectedStoreGame = $0 },
-                onSignIn:      { isAuthSheetPresented = true },
                 onOpenFeaturedBanner: { banner in
                     if let match = storeVM.activeGames.first(where: { $0.title == banner.title }) {
                         selectedStoreGame = match
@@ -114,24 +152,39 @@ private struct MainAppView: View {
         case .keyStore:
             KeyStorePage()
 
-        case .profile:
-            if authVM.isSignedIn {
-                ProfilePage()
-            } else {
-                SignInRequiredView(
-                    icon: "person.crop.circle.fill",
-                    message: "Sign in to view your profile",
-                    onSignIn: { isAuthSheetPresented = true }
-                )
-            }
         }
     }
 
     // MARK: - Sheets
 
     private var authSheet: some View {
+        sheetContainer { AuthView() }
+    }
+
+    private var profileSheet: some View {
         sheetContainer {
-            AuthView()
+            VStack(spacing: 0) {
+                sheetCloseButton { isProfilePresented = false }
+                ProfilePage()
+            }
+        }
+    }
+
+    private var wishlistSheet: some View {
+        sheetContainer {
+            VStack(spacing: 0) {
+                sheetCloseButton { isWishlistPresented = false }
+                WishlistSheet()
+            }
+        }
+    }
+
+    private var friendsSheet: some View {
+        sheetContainer {
+            VStack(spacing: 0) {
+                sheetCloseButton { isFriendsPresented = false }
+                FriendsSheet()
+            }
         }
     }
 
@@ -142,12 +195,19 @@ private struct MainAppView: View {
                 CartPage(
                     onCheckout: {
                         guard authVM.isSignedIn else {
-                            // Not signed in — close cart, show sign-in sheet
                             isCartPresented = false
                             isAuthSheetPresented = true
                             return
                         }
                         Task {
+                            if !authVM.isAdmin {
+                                let total = storeVM.cartItems.reduce(0.0) { $0 + $1.effectivePrice }
+                                do {
+                                    try await authVM.deductWallet(amount: total)
+                                } catch {
+                                    return // insufficient balance — CartPage shows warning
+                                }
+                            }
                             await storeVM.checkout(
                                 isAdmin: authVM.isAdmin,
                                 accountKey: accountKey,
@@ -169,12 +229,18 @@ private struct MainAppView: View {
                 game: game,
                 isOwned: ownedTitles.contains(game.title),
                 isInCart: storeVM.cartItems.contains(where: { $0.title == game.title }),
+                isWishlisted: storeVM.wishlistIds.contains(game.id),
                 onClose: { selectedStoreGame = nil },
                 onAddToCart: { storeVM.addToCart(game) },
                 onPlayDemo: {
                     selectedStoreGame = nil
                     selectedPlayableGame = game
-                }
+                },
+                onToggleWishlist: authVM.isSignedIn ? {
+                    if let uid = authVM.userId {
+                        Task { await storeVM.toggleWishlist(game: game, userId: uid) }
+                    }
+                } : nil
             )
             .frame(minWidth: 1100, minHeight: 760)
             .padding(20)

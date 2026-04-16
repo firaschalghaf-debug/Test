@@ -22,7 +22,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
     case library      = "Library"
     case achievements = "Achievements"
     case keyStore     = "Key Store"
-    case profile      = "Profile"
+    // Profile lives in the TopIconBar, not the sidebar
 
     var id: String { rawValue }
 
@@ -32,7 +32,6 @@ enum SidebarTab: String, CaseIterable, Identifiable {
         case .library:      return "books.vertical"
         case .achievements: return "trophy"
         case .keyStore:     return "key"
-        case .profile:      return "person.crop.circle"
         }
     }
 }

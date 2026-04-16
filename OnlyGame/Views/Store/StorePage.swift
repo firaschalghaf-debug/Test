@@ -5,9 +5,7 @@ struct StorePage: View {
     @EnvironmentObject var storeVM: StoreViewModel
 
     @Binding var featuredIndex: Int
-    let onOpenCart: () -> Void
     let onOpenGame: (Game) -> Void
-    let onSignIn: () -> Void
     let onOpenFeaturedBanner: (FeaturedBanner) -> Void
 
     @State private var searchText = ""
@@ -66,7 +64,7 @@ struct StorePage: View {
         }
     }
 
-    // MARK: - Top bar (brand + status + cart collapsed into one row)
+    // MARK: - Top bar (brand + status only — cart/wishlist/friends live in the global TopIconBar)
 
     private var topBar: some View {
         HStack(spacing: 14) {
@@ -114,40 +112,7 @@ struct StorePage: View {
                         .background(Color.cyan.opacity(0.12))
                         .clipShape(Capsule())
                 }
-            } else if authVM.isSignedIn {
-                Text("Hi, \(authVM.displayName)")
-                    .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.60))
-            } else {
-                Button(action: onSignIn) {
-                    Text("Sign In")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(Color.cyan.opacity(0.85))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                }
-                .buttonStyle(.plain)
             }
-
-            Button(action: onOpenCart) {
-                HStack(spacing: 6) {
-                    Image(systemName: "cart.fill")
-                    if storeVM.cartItems.count > 0 {
-                        Text("\(storeVM.cartItems.count)")
-                            .font(.caption.weight(.bold))
-                    }
-                }
-                .foregroundStyle(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(storeVM.cartItems.isEmpty
-                    ? Color.white.opacity(0.08)
-                    : Color.cyan.opacity(0.85))
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-            }
-            .buttonStyle(.plain)
         }
     }
 
@@ -199,8 +164,14 @@ struct StorePage: View {
                     isInCart: storeVM.cartItems.contains(where: { $0.title == game.title }),
                     isOwned: ownedTitles.contains(game.title),
                     isRecommended: recommendedTitles.contains(game.title),
+                    isWishlisted: storeVM.wishlistIds.contains(game.id),
                     onOpen: { onOpenGame(game) },
-                    onAddToCart: { storeVM.addToCart(game) }
+                    onAddToCart: { storeVM.addToCart(game) },
+                    onToggleWishlist: authVM.isSignedIn ? {
+                        if let uid = authVM.userId {
+                            Task { await storeVM.toggleWishlist(game: game, userId: uid) }
+                        }
+                    } : nil
                 )
             }
         }
