@@ -683,7 +683,7 @@ struct ContentView: View {
         Group {
             if isAuthenticated {
                 NavigationSplitView {
-                    SidebarView(selectedTab: $selectedTab)
+                    SidebarView(selectedTab: $selectedTab, pendingTradeCount: pendingTradeCount)
                         .frame(minWidth: 260, idealWidth: 280, maxWidth: 300)
                 } detail: {
                     ZStack {
@@ -1183,6 +1183,7 @@ struct ContentView: View {
 
 struct SidebarView: View {
     @Binding var selectedTab: SidebarTab?
+    let pendingTradeCount: Int
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -1217,6 +1218,15 @@ struct SidebarView: View {
                                 .minimumScaleFactor(0.9)
 
                             Spacer(minLength: 8)
+                            if tab == .trade && pendingTradeCount > 0 {
+                                Text("\(pendingTradeCount)")
+                                    .font(.caption.weight(.bold))
+                                    .foregroundStyle(.black)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Color.cyan)
+                                    .clipShape(Capsule())
+                            }
                         }
                         .padding(.horizontal, 18)
                         .padding(.vertical, 14)
