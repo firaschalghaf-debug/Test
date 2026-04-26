@@ -28,6 +28,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
     case library = "Library"
     case achievements = "Achievements"
     case keyStore = "Key Store"
+    case trade = "Trade"
     case profile = "Profile"
 
     var id: String { rawValue }
@@ -38,6 +39,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
         case .library: return "books.vertical"
         case .achievements: return "trophy"
         case .keyStore: return "key"
+        case .trade: return "arrow.left.arrow.right.circle"
         case .profile: return "person.crop.circle"
         }
     }
@@ -251,8 +253,9 @@ struct ContentView: View {
     func mapRowToGame(_ row: SupabaseGameRow) -> Game {
         let normalizedTitle = row.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let coverName: String? = normalizedTitle == "crystal run" ? "crystal_run_cover" : nil
-
+    
         return Game(
+            id: row.id.uuidString,
             title: row.title,
             genre: row.genre,
             price: row.price,
@@ -422,7 +425,164 @@ struct ContentView: View {
             selectedPlayableGame = game
         }
     }
+    // MARK: - Trade Functions
 
+    func fetchTrades() async {
+        guard let userID = SupabaseManager.shared.currentUserID else { return }
+        isLoadingTrades = true
+        do {
+            let response = try await SupabaseManager.shared.client
+                .from("trades")
+                .select()
+                .or("sender_id.eq.\(userID),receiver_id.eq.\(userID)")
+                .execute()
+            
+            let decoded = try JSONDecoder().decode([Trade].self, from: response.data)
+            
+            let pending = decoded.filter {
+                $0.status == "Pending" && $0.receiver_id.uuidString == userID
+            }
+            
+            await MainActor.run {
+                pendingTradeCount = pending.count
+                isLoadingTrades = false
+            }
+        } catch {
+            await MainActor.run {
+                tradeError = error.localizedDescription
+                isLoadingTrades = false
+            }
+        }
+    }
+    
+    func sendTradeOffer(offeredGame: Game, requestedGame: Game, receiverUsername: String) async {
+        guard let senderID = SupabaseManager.shared.currentUserID else { return }
+        
+        do {
+            // Find receiver profile by username
+            let profileResponse = try await SupabaseManager.shared.client
+                .from("profiles")
+                .select()
+                .eq("username", value: receiverUsername)
+                .single()
+                .execute()
+            
+            struct ProfileRow: Decodable { let id: UUID }
+            let profile = try JSONDecoder().decode(ProfileRow.self, from: profileResponse.data)
+            
+            // Insert trade
+            let tradeData: [String: String] = [
+                "sender_id": senderID,
+                "receiver_id": profile.id.uuidString,
+                "offered_game_id": offeredGame.id,
+                "requested_game_id": requestedGame.id,
+                "status": "Pending"
+            ]
+            
+            try await SupabaseManager.shared.client
+                .from("trades")
+                .insert(tradeData)
+                .execute()
+            
+            await MainActor.run {
+                isTradeSheetPresented = false
+                tradeOfferedGame = nil
+                tradeRequestedGame = nil
+                tradeTargetUsername = ""
+            }
+        } catch {
+            await MainActor.run {
+                tradeError = error.localizedDescription
+            }
+        }
+    }
+    
+    func acceptTrade(trade: Trade) async {
+        guard let userID = SupabaseManager.shared.currentUserID else { return }
+        
+        do {
+            // Remove offered game from sender's library
+            try await SupabaseManager.shared.client
+                .from("user_library")
+                .delete()
+                .eq("user_id", value: trade.sender_id.uuidString)
+                .eq("game_id", value: trade.offered_game_id.uuidString)
+                .execute()
+            
+            // Add offered game to receiver's library
+            try await SupabaseManager.shared.client
+                .from("user_library")
+                .insert([
+                    "user_id": userID,
+                    "game_id": trade.offered_game_id.uuidString
+                ])
+                .execute()
+            
+            // Remove requested game from receiver's library
+            try await SupabaseManager.shared.client
+                .from("user_library")
+                .delete()
+                .eq("user_id", value: userID)
+                .eq("game_id", value: trade.requested_game_id.uuidString)
+                .execute()
+            
+            // Add requested game to sender's library
+            try await SupabaseManager.shared.client
+                .from("user_library")
+                .insert([
+                    "user_id": trade.sender_id.uuidString,
+                    "game_id": trade.requested_game_id.uuidString
+                ])
+                .execute()
+            
+            // Update trade status
+            try await SupabaseManager.shared.client
+                .from("trades")
+                .update(["status": "Accepted"])
+                .eq("trade_id", value: String(trade.trade_id))
+                .execute()
+            
+            await fetchTrades()
+            
+        } catch {
+            await MainActor.run {
+                tradeError = error.localizedDescription
+            }
+        }
+    }
+    
+    func declineTrade(trade: Trade) async {
+        do {
+            try await SupabaseManager.shared.client
+                .from("trades")
+                .update(["status": "Declined"])
+                .eq("trade_id", value: String(trade.trade_id))
+                .execute()
+            
+            await fetchTrades()
+        } catch {
+            await MainActor.run {
+                tradeError = error.localizedDescription
+            }
+        }
+    }
+    
+    func cancelTrade(trade: Trade) async {
+        do {
+            try await SupabaseManager.shared.client
+                .from("trades")
+                .update(["status": "Cancelled"])
+                .eq("trade_id", value: String(trade.trade_id))
+                .execute()
+            
+            await fetchTrades()
+        } catch {
+            await MainActor.run {
+                tradeError = error.localizedDescription
+            }
+        }
+    }
+    
     func checkoutCart() {
         guard !cartItems.isEmpty else { return }
         let newTitles = cartItems.map { $0.title }
@@ -578,6 +738,26 @@ struct ContentView: View {
                             PlaceholderPage(title: "Achievements", subtitle: "Track your unlocked achievements.", icon: "trophy.fill")
                         case .keyStore:
                             PlaceholderPage(title: "Key Store", subtitle: "Redeem keys.", icon: "key.fill")
+                        case .trade:
+                            TradeView(
+                                currentUserID: SupabaseManager.shared.currentUserID ?? "",
+                                ownedGames: currentLibraryGames,
+                                allGames: activeGames,
+                                isLoading: isLoadingTrades,
+                                error: tradeError,
+                                pendingTradeCount: pendingTradeCount,
+                                onSendOffer: { offered, requested, username in
+                                    await sendTradeOffer(
+                                        offeredGame: offered,
+                                        requestedGame: requested,
+                                        receiverUsername: username
+                                    )
+                                },
+                                onAccept: { trade in await acceptTrade(trade: trade) },
+                                onDecline: { trade in await declineTrade(trade: trade) },
+                                onCancel: { trade in await cancelTrade(trade: trade) },
+                                trades: []
+                            )
                         case .profile:
                             ScrollView {
                                 VStack(spacing: 24) {
@@ -881,6 +1061,7 @@ struct ContentView: View {
             if dbGames.isEmpty {
                 await fetchGamesFromSupabase()
             }
+            await fetchTrades()
         }
         .sheet(isPresented: $isCartPresented) {
             ZStack {
@@ -2117,4 +2298,347 @@ struct SupabaseGameRow: Decodable {
     let image: String?
 }
 
+struct TradeView: View {
+    let currentUserID: String
+    let ownedGames: [Game]
+    let allGames: [Game]
+    let isLoading: Bool
+    let error: String
+    let pendingTradeCount: Int
+    let onSendOffer: (Game, Game, String) async -> Void
+    let onAccept: (Trade) async -> Void
+    let onDecline: (Trade) async -> Void
+    let onCancel: (Trade) async -> Void
+    let trades: [Trade]
+
+    @State private var selectedTab = 0
+    @State private var offeredGame: Game? = nil
+    @State private var requestedGame: Game? = nil
+    @State private var targetUsername = ""
+    @State private var isSending = false
+    @State private var sendError = ""
+
+    var pendingIncoming: [Trade] {
+        trades.filter { $0.status == "Pending" && $0.receiver_id.uuidString == currentUserID }
+    }
+
+    var pendingOutgoing: [Trade] {
+        trades.filter { $0.status == "Pending" && $0.sender_id.uuidString == currentUserID }
+    }
+
+    var completedTrades: [Trade] {
+        trades.filter { $0.status != "Pending" }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Game Trading")
+                        .font(.system(size: 38, weight: .bold))
+                        .foregroundStyle(.white)
+                    Text("Trade games with other players.")
+                        .foregroundStyle(.white.opacity(0.72))
+                }
+
+                // ── Send Trade Offer ──────────────────────────────────────
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Send Trade Offer")
+                        .font(.title2.bold())
+                        .foregroundStyle(.white)
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Your game to offer")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.6))
+
+                        if ownedGames.isEmpty {
+                            Text("You don't own any games to trade.")
+                                .foregroundStyle(.white.opacity(0.5))
+                                .font(.subheadline)
+                        } else {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 10) {
+                                    ForEach(ownedGames) { game in
+                                        Button {
+                                            offeredGame = game
+                                        } label: {
+                                            Text(game.title)
+                                                .font(.subheadline.weight(.semibold))
+                                                .foregroundStyle(offeredGame?.id == game.id ? .black : .white)
+                                                .padding(.horizontal, 14)
+                                                .padding(.vertical, 10)
+                                                .background(offeredGame?.id == game.id ? Color.cyan : Color.white.opacity(0.08))
+                                                .clipShape(Capsule())
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                            }
+                        }
+
+                        Text("Game you want in return")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.6))
+
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 10) {
+                                ForEach(allGames.filter { game in
+                                    !ownedGames.contains(where: { $0.id == game.id })
+                                }) { game in
+                                    Button {
+                                        requestedGame = game
+                                    } label: {
+                                        Text(game.title)
+                                            .font(.subheadline.weight(.semibold))
+                                            .foregroundStyle(requestedGame?.id == game.id ? .black : .white)
+                                            .padding(.horizontal, 14)
+                                            .padding(.vertical, 10)
+                                            .background(requestedGame?.id == game.id ? Color.purple : Color.white.opacity(0.08))
+                                            .clipShape(Capsule())
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                        }
+
+                        Text("Recipient username")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.6))
+
+                        TextField("Enter username", text: $targetUsername)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 300)
+
+                        if !sendError.isEmpty {
+                            Text(sendError)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+
+                        Button {
+                            guard let offered = offeredGame,
+                                  let requested = requestedGame,
+                                  !targetUsername.isEmpty else {
+                                sendError = "Please select both games and enter a username."
+                                return
+                            }
+                            sendError = ""
+                            isSending = true
+                            Task {
+                                await onSendOffer(offered, requested, targetUsername)
+                                isSending = false
+                                offeredGame = nil
+                                requestedGame = nil
+                                targetUsername = ""
+                            }
+                        } label: {
+                            Text(isSending ? "Sending..." : "Send Trade Offer")
+                                .font(.headline.weight(.semibold))
+                                .frame(maxWidth: 200)
+                                .padding(.vertical, 12)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.cyan)
+                        .disabled(isSending || offeredGame == nil || requestedGame == nil || targetUsername.isEmpty)
+                    }
+                    .padding(20)
+                    .background(Color.white.opacity(0.05))
+                    .clipShape(RoundedRectangle(cornerRadius: 20))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20)
+                            .stroke(Color.white.opacity(0.10), lineWidth: 1)
+                    )
+                }
+
+                // ── Incoming Trade Offers ─────────────────────────────────
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack {
+                        Text("Incoming Offers")
+                            .font(.title2.bold())
+                            .foregroundStyle(.white)
+                        if !pendingIncoming.isEmpty {
+                            Text("\(pendingIncoming.count)")
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(.black)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.cyan)
+                                .clipShape(Capsule())
+                        }
+                    }
+
+                    if pendingIncoming.isEmpty {
+                        Text("No incoming trade offers.")
+                            .foregroundStyle(.white.opacity(0.5))
+                            .font(.subheadline)
+                    } else {
+                        ForEach(pendingIncoming) { trade in
+                            TradeOfferRow(
+                                trade: trade,
+                                currentUserID: currentUserID,
+                                allGames: allGames,
+                                isIncoming: true,
+                                onAccept: { Task { await onAccept(trade) } },
+                                onDecline: { Task { await onDecline(trade) } },
+                                onCancel: {}
+                            )
+                        }
+                    }
+                }
+
+                // ── Outgoing Trade Offers ─────────────────────────────────
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Outgoing Offers")
+                        .font(.title2.bold())
+                        .foregroundStyle(.white)
+
+                    if pendingOutgoing.isEmpty {
+                        Text("No outgoing trade offers.")
+                            .foregroundStyle(.white.opacity(0.5))
+                            .font(.subheadline)
+                    } else {
+                        ForEach(pendingOutgoing) { trade in
+                            TradeOfferRow(
+                                trade: trade,
+                                currentUserID: currentUserID,
+                                allGames: allGames,
+                                isIncoming: false,
+                                onAccept: {},
+                                onDecline: {},
+                                onCancel: { Task { await onCancel(trade) } }
+                            )
+                        }
+                    }
+                }
+
+                // ── Trade History ─────────────────────────────────────────
+                if !completedTrades.isEmpty {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text("Trade History")
+                            .font(.title2.bold())
+                            .foregroundStyle(.white)
+
+                        ForEach(completedTrades) { trade in
+                            TradeOfferRow(
+                                trade: trade,
+                                currentUserID: currentUserID,
+                                allGames: allGames,
+                                isIncoming: false,
+                                onAccept: {},
+                                onDecline: {},
+                                onCancel: {}
+                            )
+                        }
+                    }
+                }
+            }
+            .padding(28)
+        }
+    }
+}
+
+struct TradeOfferRow: View {
+    let trade: Trade
+    let currentUserID: String
+    let allGames: [Game]
+    let isIncoming: Bool
+    let onAccept: () -> Void
+    let onDecline: () -> Void
+    let onCancel: () -> Void
+
+    var offeredGame: Game? {
+        allGames.first { $0.id == trade.offered_game_id.uuidString }
+    }
+
+    var requestedGame: Game? {
+        allGames.first { $0.id == trade.requested_game_id.uuidString }
+    }
+
+    var statusColor: Color {
+        switch trade.status {
+        case "Accepted":  return .green
+        case "Declined":  return .red
+        case "Cancelled": return .orange
+        default:          return .cyan
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(isIncoming ? "Incoming Trade Offer" : "Outgoing Trade Offer")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                    Text(trade.created_at.prefix(10))
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.5))
+                }
+                Spacer()
+                Text(trade.status)
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(statusColor)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(statusColor.opacity(0.15))
+                    .clipShape(Capsule())
+            }
+
+            HStack(spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Offered")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.6))
+                    Text(offeredGame?.title ?? "Unknown Game")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.cyan)
+                }
+
+                Image(systemName: "arrow.left.arrow.right")
+                    .foregroundStyle(.white.opacity(0.5))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Requested")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.6))
+                    Text(requestedGame?.title ?? "Unknown Game")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.purple)
+                }
+
+                Spacer()
+            }
+
+            if trade.status == "Pending" {
+                HStack(spacing: 12) {
+                    if isIncoming {
+                        Button("Accept") { onAccept() }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.green)
+                            .controlSize(.small)
+
+                        Button("Decline") { onDecline() }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.red)
+                            .controlSize(.small)
+                    } else {
+                        Button("Cancel Offer") { onCancel() }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.orange)
+                            .controlSize(.small)
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .background(Color.white.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(Color.white.opacity(0.10), lineWidth: 1)
+        )
+    }
+}
 
