@@ -85,6 +85,18 @@ struct ContentView: View {
     @State private var isAuthLoading = false
     @State private var authError = ""
     @State private var isSignUpMode = false
+
+    @State private var trades: [TradeWithDetails] = []
+    @State private var isTradeViewPresented = false
+    @State private var isLoadingTrades = false
+    @State private var tradeError = ""
+    @State private var selectedTradeGame: Game? = nil
+    @State private var tradeTargetUsername = ""
+    @State private var tradeOfferedGame: Game? = nil
+    @State private var tradeRequestedGame: Game? = nil
+    @State private var isTradeSheetPresented = false
+    @State private var pendingTradeCount = 0
+    
     func refreshAuthState() {
         isAuthenticated = SupabaseManager.shared.currentUserID != nil
     }
@@ -2077,6 +2089,25 @@ struct GameView: View {
     ContentView()
 }
     
+
+struct Trade: Identifiable, Decodable {
+    let trade_id: Int
+    let sender_id: UUID
+    let receiver_id: UUID
+    let offered_game_id: UUID
+    let requested_game_id: UUID
+    let status: String
+    let created_at: String
+    var id: Int { trade_id }
+}
+
+struct TradeWithDetails: Identifiable {
+    let trade: Trade
+    let offeredGame: Game
+    let requestedGame: Game
+    let senderUsername: String
+    var id: Int { trade.trade_id }
+}
 
 struct SupabaseGameRow: Decodable {
     let id: UUID
